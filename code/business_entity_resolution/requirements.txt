@@ -1,0 +1,10 @@
+pandas>=2.0.0
+numpy>=1.21.3
+scikit-learn>=1.2.0
+sparse_dot_topn>=1.2.0
+rapidfuzz>=3.0.0
+pyarrow>=14.0.0
+lightgbm>=4.0.0
+tqdm>=4.65.0
+matplotlib>=3.7.0
+seaborn>=0.12.0

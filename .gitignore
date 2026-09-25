@@ -1,0 +1,25 @@
+# Ignore large datasets
+dataset/
+*.tsv
+*.parquet
+*.csv
+
+# Ignore large output files and models
+output/*
+!output/.gitkeep
+output/processed/
+output/models/
+output/eda_plots/
+
+# Ignore PDFs and generated text
+*.pdf
+ps_text.txt
+
+# Python cache files
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS specific files
+.DS_Store
