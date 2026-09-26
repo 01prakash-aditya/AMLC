@@ -49,6 +49,47 @@ def generate_embeddings(model, texts):
         convert_to_numpy=True
     )
 
+def process_target_chunk(model, df1, target_df, device, top_k=15, prefix="S2"):
+    """Encodes a target DF, builds a FAISS index, and queries it with df1."""
+    print(f"\n--- Encoding Targets ({prefix}) ---")
+    target_ids = target_df['entity_id'].values
+    
+    # Generate embeddings in chunks to save memory
+    target_embeddings = generate_embeddings(model, target_df['full_text'])
+    dim = target_embeddings.shape[1]
+    
+    print(f"--- Building FAISS Index ({prefix}) ---")
+    index = faiss.IndexFlatIP(dim)
+    if device == "cuda":
+        res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(res, 0, index)
+        
+    index.add(target_embeddings)
+    print(f"Successfully indexed {index.ntotal:,} vectors.")
+    
+    del target_embeddings
+    gc.collect()
+    
+    print(f"--- Encoding Queries (Source 1) & Searching FAISS ({prefix}) ---")
+    query_embeddings = generate_embeddings(model, df1['full_text'])
+    s1_ids = df1['entity_id'].values
+    
+    distances, indices = index.search(query_embeddings, top_k)
+    
+    pairs = []
+    for i in range(len(s1_ids)):
+        s1 = s1_ids[i]
+        for j in range(top_k):
+            idx = indices[i][j]
+            score = distances[i][j]
+            if score > 0.65:
+                pairs.append({'s1_id': s1, 'cand_id': target_ids[idx], 'score': score})
+                
+    del index, query_embeddings
+    gc.collect()
+    
+    return pairs
+
 def run_semantic_blocking(is_test=False, top_k=15):
     t0 = time.time()
     
@@ -62,51 +103,22 @@ def run_semantic_blocking(is_test=False, top_k=15):
         print("Preprocessed files not found. Run Stage 2 first.")
         sys.exit(1)
         
-    print("\n--- Encoding Targets (Source 2 & Source 3) ---")
-    targets = pd.concat([df2, df3], ignore_index=True)
-    target_ids = targets['entity_id'].values
+    all_pairs = []
     
-    # We embed the full_text (name + address)
-    target_embeddings = generate_embeddings(model, targets['full_text'])
-    dim = target_embeddings.shape[1]
-    
-    print("\n--- Building FAISS Index ---")
-    # Inner Product (IP) index behaves exactly like Cosine Similarity since vectors are normalized
-    index = faiss.IndexFlatIP(dim)
-    
-    # If GPU is available, move index to GPU for lightning-fast search
-    if device == "cuda":
-        res = faiss.StandardGpuResources()
-        index = faiss.index_cpu_to_gpu(res, 0, index)
-        
-    index.add(target_embeddings)
-    print(f"Successfully indexed {index.ntotal:,} target vectors.")
-    
-    # Free up memory (keep FAISS index and target_ids)
-    del targets, df2, df3, target_embeddings
+    # Process Source 2
+    s2_pairs = process_target_chunk(model, df1, df2, device, top_k=top_k, prefix="Source 2")
+    all_pairs.extend(s2_pairs)
+    del df2, s2_pairs
     gc.collect()
     
-    print("\n--- Encoding Queries (Source 1) & Searching FAISS ---")
-    query_embeddings = generate_embeddings(model, df1['full_text'])
-    s1_ids = df1['entity_id'].values
+    # Process Source 3
+    s3_pairs = process_target_chunk(model, df1, df3, device, top_k=top_k, prefix="Source 3")
+    all_pairs.extend(s3_pairs)
+    del df3, s3_pairs
+    gc.collect()
     
-    print(f"Querying FAISS for Top-{top_k} matches...")
-    distances, indices = index.search(query_embeddings, top_k)
-    
-    print("\n--- Processing Results ---")
-    # Flatten the results into a list of (s1_id, target_id, score)
-    pairs = []
-    for i in range(len(s1_ids)):
-        s1 = s1_ids[i]
-        for j in range(top_k):
-            idx = indices[i][j]
-            score = distances[i][j]
-            # Optional thresholding: Only keep candidates with cosine similarity > 0.65
-            if score > 0.65:
-                pairs.append({'s1_id': s1, 'cand_id': target_ids[idx], 'score': score})
-                
-    cands_df = pd.DataFrame(pairs)
-    print(f"Generated {len(cands_df):,} candidate pairs after similarity thresholding.")
+    cands_df = pd.DataFrame(all_pairs)
+    print(f"\nGenerated {len(cands_df):,} total candidate pairs after similarity thresholding.")
     
     # Group for output format
     print("Formatting output...")
