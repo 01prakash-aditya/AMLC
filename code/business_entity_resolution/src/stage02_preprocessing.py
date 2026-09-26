@@ -3,113 +3,43 @@ Stage 2: Text Preprocessing & Normalization
 ===========================================
 Amazon ML Challenge - Business Entity Resolution
 
-This module provides optimized functions for normalizing noisy business names,
-addresses, and countries. It uses vectorized pandas operations where possible.
+DEEP LEARNING EDITION:
+Unlike the previous TF-IDF pipeline, Deep Learning models (Cross-Encoders)
+perform worse when text is aggressively lowercased and stripped of punctuation.
+This script simply handles NaN values, formats a clean text string, and saves
+as Parquet to ensure the Transformers get the raw contextual clues they need.
 """
 
-import re
-import unicodedata
 import pandas as pd
-from typing import Optional
+from pathlib import Path
+import os
+import gc
 
-# Pre-compile regexes for performance on 12M rows
-RE_PUNCT_CLEAN = re.compile(r'[^\w\s]')
-RE_MULTI_SPACE = re.compile(r'\s+')
-RE_PINCODE = re.compile(r'\b\d{5,6}\b')
-RE_LANDMARK = re.compile(r'\b(near|opp|opposite|behind|beside|above|below)\b.*', re.IGNORECASE)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+DATASET_DIR = PROJECT_ROOT / "dataset"
+PROCESSED_DIR = PROJECT_ROOT / "output" / "processed"
 
-# Legal suffix normalization mapping
-LEGAL_SUFFIXES = {
-    'llc': 'llc', 'l l c': 'llc',
-    'inc': 'inc', 'incorporated': 'inc',
-    'corp': 'corp', 'corporation': 'corp',
-    'co': 'co', 'company': 'co',
-    'ltd': 'ltd', 'limited': 'ltd',
-    'pvt': 'pvt', 'private': 'pvt',
-    'llp': 'llp',
-    'sarl': 'sarl', 'sa': 'sa', 'sas': 'sas'
-}
-
-# Address abbreviations mapping
-ADDR_ABBR = {
-    'rd': 'road', 'st': 'street', 'ave': 'avenue',
-    'blvd': 'boulevard', 'dr': 'drive', 'ln': 'lane',
-    'ste': 'suite', 'apt': 'apartment', 'bldg': 'building',
-    'opp': 'opposite', 'nr': 'near',
-    'dist': 'district', 'distt': 'district'
-}
-
-def clean_text_basic(text: pd.Series) -> pd.Series:
-    """Basic lowercasing, unicode normalization, and space trimming."""
-    s = text.fillna("").astype(str).str.lower()
-    # Unicode normalization (NFKD removes accents: é -> e)
-    s = s.apply(lambda x: unicodedata.normalize('NFKD', x).encode('ascii', 'ignore').decode('utf-8'))
-    return s
-
-def normalize_names(names: pd.Series) -> pd.Series:
-    """Normalize business names."""
-    s = clean_text_basic(names)
-    s = s.str.replace(RE_PUNCT_CLEAN, ' ', regex=True)
-    for variant, standard in LEGAL_SUFFIXES.items():
-        s = s.str.replace(rf'\b{variant}\b', standard, regex=True)
-    s = s.str.replace(RE_MULTI_SPACE, ' ', regex=True).str.strip()
-    return s
-
-def normalize_addresses(addresses: pd.Series) -> pd.Series:
-    """Normalize business addresses, including landmark removal."""
-    s = clean_text_basic(addresses)
-    
-    # Strip out landmark descriptions (e.g., 'near SBI ATM...', 'opp City Mall')
-    s = s.str.replace(RE_LANDMARK, ' ', regex=True)
-    
-    # Remove punctuation
-    s = s.str.replace(RE_PUNCT_CLEAN, ' ', regex=True)
-    
-    # Standardize abbreviations across US, India, France
-    for variant, standard in ADDR_ABBR.items():
-        s = s.str.replace(rf'\b{variant}\b', standard, regex=True)
-    
-    s = s.str.replace(RE_MULTI_SPACE, ' ', regex=True).str.strip()
-    return s
-
-def extract_pincode(addresses: pd.Series) -> pd.Series:
-    """Extract 5 (US/FR) or 6 (IN) digit PIN/ZIP codes from addresses."""
-    return addresses.astype(str).apply(
-        lambda x: match.group(0) if (match := RE_PINCODE.search(x)) else ""
-    )
-
-def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply all preprocessing to a dataframe and return it."""
+def preprocess_for_dl(df: pd.DataFrame) -> pd.DataFrame:
     out_df = df.copy()
     
-    print("  Normalizing names...")
-    out_df['name_norm'] = normalize_names(df['business_name'])
+    # Fill missing values with empty strings
+    out_df['business_name'] = out_df['business_name'].fillna("").astype(str).str.strip()
+    out_df['business_address'] = out_df['business_address'].fillna("").astype(str).str.strip()
+    out_df['country'] = out_df['country'].fillna("").astype(str).str.strip()
     
-    print("  Normalizing addresses...")
-    out_df['address_norm'] = normalize_addresses(df['business_address'])
+    # Create the concatenated text for FAISS semantic embedding & Cross-Encoder
+    out_df['full_text'] = out_df.apply(
+        lambda row: f"{row['business_name']}, {row['business_address']} ({row['country']})".replace(" ,", ",").replace(" ()", ""),
+        axis=1
+    )
     
-    print("  Extracting PIN/ZIP codes...")
-    out_df['pincode'] = extract_pincode(df['business_address'])
-    
-    print("  Normalizing country...")
-    out_df['country_norm'] = clean_text_basic(df['country'])
-    
-    # Create a concatenated field for full-text search / blocking
-    out_df['full_text'] = out_df['name_norm'] + " " + out_df['address_norm']
-    
-    # Clean up empty strings
-    out_df = out_df.replace(r'^\s*$', "", regex=True)
+    # Clean up multi-spaces
+    out_df['full_text'] = out_df['full_text'].str.replace(r'\s+', ' ', regex=True).str.strip()
     
     return out_df
 
 def process_all_files():
-    """Process all raw TSVs and save them as parquet files for faster downstream loading."""
-    from pathlib import Path
-    import os
-    
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-    DATASET_DIR = PROJECT_ROOT / "dataset"
-    PROCESSED_DIR = PROJECT_ROOT / "output" / "processed"
+    """Process all raw TSVs and save them as parquet files."""
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     
     files_to_process = [
@@ -126,24 +56,17 @@ def process_all_files():
         out_name = filename.replace('.tsv', '_cleaned.parquet')
         out_path = PROCESSED_DIR / out_name
         
-        if out_path.exists():
-            print(f"Skipping {filename}, already processed: {out_path}")
-            continue
-            
         print(f"\nProcessing {filename}...")
         df = pd.read_csv(in_path, sep="\t", dtype=str, keep_default_na=False)
         print(f"  Loaded {len(df):,} rows.")
         
-        df_clean = preprocess_dataframe(df)
+        df_clean = preprocess_for_dl(df)
         
         print(f"  Saving to {out_path}...")
         df_clean.to_parquet(out_path, index=False)
         print("  Done.")
         
-        # Free memory
-        del df
-        del df_clean
-        import gc
+        del df, df_clean
         gc.collect()
 
 if __name__ == "__main__":
