@@ -46,14 +46,16 @@ def load_data(is_test=False):
     return df1, df2, df3
 
 def build_candidates(df1: pd.DataFrame, target_df: pd.DataFrame, text_col: str, 
-                     analyzer: str = 'char_wb', ngram_range: tuple = (2,4), 
-                     top_k: int = 20, threshold: float = 0.4):
+                     analyzer: str = 'char_wb', ngram_range: tuple = (3,4), 
+                     top_k: int = 15, threshold: float = 0.35, max_features: int = 100000):
     """
     Find top-k matches for df1 in target_df using TF-IDF on `text_col`.
+    Uses chunking to avoid RAM explosions on huge dense matrices.
     """
     print(f"  Building TF-IDF ({analyzer} {ngram_range}) on '{text_col}' for {len(df1):,} queries vs {len(target_df):,} targets...")
     
-    vectorizer = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram_range, min_df=2)
+    # max_features restricts the vocabulary to the most frequent n-grams, drastically reducing matrix size
+    vectorizer = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram_range, min_df=3, max_df=0.8, max_features=max_features)
     vectorizer.fit(target_df[text_col])
     
     target_tfidf = vectorizer.transform(target_df[text_col])
@@ -61,26 +63,43 @@ def build_candidates(df1: pd.DataFrame, target_df: pd.DataFrame, text_col: str,
     
     print(f"  Computing top {top_k} nearest neighbors (threshold {threshold})...")
     
-    # Using the modern sparse_dot_topn API
     target_tfidf_t = target_tfidf.transpose().tocsr()
-    matches = sp_matmul_topn(
-        query_tfidf.tocsr(), 
-        target_tfidf_t, 
-        top_n=top_k, 
-        threshold=threshold,
-        n_threads=os.cpu_count() or 4
-    ).tocoo()
+    query_tfidf = query_tfidf.tocsr()
+    
+    # Process queries in chunks to prevent memory explosion
+    chunk_size = 250000
+    n_queries = query_tfidf.shape[0]
+    results_list = []
     
     s1_ids = df1['entity_id'].values
     target_ids = target_df['entity_id'].values
     
-    results = pd.DataFrame({
-        's1_id': s1_ids[matches.row],
-        'cand_id': target_ids[matches.col],
-        'score': matches.data
-    })
+    for start_idx in range(0, n_queries, chunk_size):
+        end_idx = min(start_idx + chunk_size, n_queries)
+        print(f"    -> Chunk {start_idx:,} to {end_idx:,} / {n_queries:,}")
+        
+        q_chunk = query_tfidf[start_idx:end_idx]
+        
+        # Using the modern sparse_dot_topn API (1 thread per chunk usually safest in Jupyter)
+        matches = sp_matmul_topn(
+            q_chunk, 
+            target_tfidf_t, 
+            top_n=top_k, 
+            threshold=threshold,
+            n_threads=1 
+        ).tocoo()
+        
+        chunk_s1_ids = s1_ids[start_idx:end_idx]
+        
+        results_list.append(pd.DataFrame({
+            's1_id': chunk_s1_ids[matches.row],
+            'cand_id': target_ids[matches.col],
+            'score': matches.data
+        }))
+        
+    results = pd.concat(results_list, ignore_index=True) if results_list else pd.DataFrame()
     
-    del query_tfidf, target_tfidf, target_tfidf_t, matches, vectorizer
+    del query_tfidf, target_tfidf, target_tfidf_t, vectorizer, results_list
     gc.collect()
     
     return results
@@ -101,8 +120,8 @@ def run_multi_signal_blocking(is_test=False):
     # High recall for fuzzy misspellings across both fields
     # -------------------------------------------------------------------------
     print("\n[SIGNAL 1] TF-IDF Char N-Grams on Full Text")
-    c1_s2 = build_candidates(df1, df2, text_col='full_text', analyzer='char_wb', ngram_range=(3,5), top_k=10, threshold=0.30)
-    c1_s3 = build_candidates(df1, df3, text_col='full_text', analyzer='char_wb', ngram_range=(3,5), top_k=10, threshold=0.30)
+    c1_s2 = build_candidates(df1, df2, text_col='full_text', analyzer='char_wb', ngram_range=(3,4), top_k=10, threshold=0.35, max_features=100000)
+    c1_s3 = build_candidates(df1, df3, text_col='full_text', analyzer='char_wb', ngram_range=(3,4), top_k=10, threshold=0.35, max_features=100000)
     all_candidates.extend([c1_s2, c1_s3])
     del c1_s2, c1_s3; gc.collect()
     
@@ -111,8 +130,8 @@ def run_multi_signal_blocking(is_test=False):
     # Catches exact/near-exact names even if addresses are completely different
     # -------------------------------------------------------------------------
     print("\n[SIGNAL 2] TF-IDF Word N-Grams on Name Only")
-    c2_s2 = build_candidates(df1, df2, text_col='name_norm', analyzer='word', ngram_range=(1,2), top_k=5, threshold=0.45)
-    c2_s3 = build_candidates(df1, df3, text_col='name_norm', analyzer='word', ngram_range=(1,2), top_k=5, threshold=0.45)
+    c2_s2 = build_candidates(df1, df2, text_col='name_norm', analyzer='word', ngram_range=(1,2), top_k=5, threshold=0.45, max_features=80000)
+    c2_s3 = build_candidates(df1, df3, text_col='name_norm', analyzer='word', ngram_range=(1,2), top_k=5, threshold=0.45, max_features=80000)
     all_candidates.extend([c2_s2, c2_s3])
     del c2_s2, c2_s3; gc.collect()
 
@@ -121,8 +140,8 @@ def run_multi_signal_blocking(is_test=False):
     # Catches misspelled names with missing/garbage addresses
     # -------------------------------------------------------------------------
     print("\n[SIGNAL 3] TF-IDF Char N-Grams on Name Only")
-    c3_s2 = build_candidates(df1, df2, text_col='name_norm', analyzer='char_wb', ngram_range=(3,4), top_k=5, threshold=0.40)
-    c3_s3 = build_candidates(df1, df3, text_col='name_norm', analyzer='char_wb', ngram_range=(3,4), top_k=5, threshold=0.40)
+    c3_s2 = build_candidates(df1, df2, text_col='name_norm', analyzer='char_wb', ngram_range=(3,4), top_k=5, threshold=0.40, max_features=80000)
+    c3_s3 = build_candidates(df1, df3, text_col='name_norm', analyzer='char_wb', ngram_range=(3,4), top_k=5, threshold=0.40, max_features=80000)
     all_candidates.extend([c3_s2, c3_s3])
     del c3_s2, c3_s3; gc.collect()
     
