@@ -7,27 +7,27 @@ python code\business_entity_resolution\src\stage02_preprocessing.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Stage 2 failed!"; exit 1 }
 
 Write-Host "`n=========================================="
-Write-Host "STARTING STAGE 3: BLOCKING"
+Write-Host "STARTING STAGE 3: FAISS SEMANTIC BLOCKING"
 Write-Host "=========================================="
 python code\business_entity_resolution\src\stage03_blocking.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Stage 3 failed!"; exit 1 }
 
 Write-Host "`n=========================================="
-Write-Host "STARTING STAGE 4: FEATURE ENGINEERING"
+Write-Host "STARTING STAGE 4: CROSS-ENCODER DATA PREP"
 Write-Host "=========================================="
-python code\business_entity_resolution\src\stage04_feature_engineering.py
+python code\business_entity_resolution\src\stage04_cross_encoder_prep.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Stage 4 failed!"; exit 1 }
 
 Write-Host "`n=========================================="
-Write-Host "STARTING STAGE 5: MODEL TRAINING"
+Write-Host "STARTING STAGE 5: CROSS-ENCODER FINE-TUNING"
 Write-Host "=========================================="
-python code\business_entity_resolution\src\stage05_model_training.py
+python code\business_entity_resolution\src\stage05_cross_encoder_train.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Stage 5 failed!"; exit 1 }
 
 Write-Host "`n=========================================="
-Write-Host "STARTING STAGE 6: INFERENCE"
+Write-Host "STARTING STAGE 6: CROSS-ENCODER INFERENCE"
 Write-Host "=========================================="
-python code\business_entity_resolution\src\stage06_inference.py
+python code\business_entity_resolution\src\stage06_graph_inference.py
 if ($LASTEXITCODE -ne 0) { Write-Error "Stage 6 failed!"; exit 1 }
 
 Write-Host "`n=========================================="

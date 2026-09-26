@@ -59,29 +59,29 @@ Reads the raw TSVs, performs multi-lingual text normalization (stripping accents
 python code/business_entity_resolution/src/stage02_preprocessing.py
 ```
 
-### Stage 3: Multi-Signal Blocking
-Generates candidate pairs using three overlapping TF-IDF cosine similarity signals via `sparse_dot_topn` (Full Text Char N-Grams, Name Word N-Grams, and Name Char N-Grams). Merges these signals into a unified candidate set to ensure maximum recall.
+### Stage 3: Dense Semantic Blocking
+Uses `sentence-transformers` (paraphrase-multilingual-MiniLM) to encode names and addresses into dense semantic vectors, then uses GPU-accelerated **FAISS** to instantly retrieve the Top-15 most semantically similar matches. Handles multi-lingual abbreviations natively.
 ```bash
 python code/business_entity_resolution/src/stage03_blocking.py
 ```
-*Note: This generates `train_candidate_pairs.tsv` and `test_candidate_pairs.tsv` in `output/`.*
+*Note: This generates `train_candidate_pairs.tsv` and `test_candidate_pairs.tsv`.*
 
-### Stage 4: Feature Engineering
-Extracts pairwise string similarity features (Levenshtein, Jaro-Winkler, Token Sort, Token Set) between candidates using `rapidfuzz`. Saves `train_features.parquet` and `test_features.parquet`.
+### Stage 4: Cross-Encoder Data Prep
+Mines the FAISS output against the ground truth to build a high-quality dataset of positive matches and "hard negatives".
 ```bash
-python code/business_entity_resolution/src/stage04_feature_engineering.py
+python code/business_entity_resolution/src/stage04_cross_encoder_prep.py
 ```
 
-### Stage 5: Model Training
-Trains the LightGBM classifier with balanced class weights to handle heavy negative sampling. Performs an explicit grid-search to find the probability threshold that maximizes the F0.5 score.
+### Stage 5: Cross-Encoder Fine-Tuning
+Fine-tunes a Deep Learning `xlm-roberta-base` Cross-Encoder model on the hard-negative dataset using Binary Cross-Entropy loss. This replaces manually engineered string-features with deep contextual attention.
 ```bash
-python code/business_entity_resolution/src/stage05_model_training.py
+python code/business_entity_resolution/src/stage05_cross_encoder_train.py
 ```
 
-### Stage 6: Inference & Post-Processing
-Predicts match probabilities on the test set. Uses a **Dual-Threshold Singleton Guard** strategy (a strict threshold to "activate" entities, preventing false positives on Singletons) to output the final results.
+### Stage 6: Cross-Encoder Inference & Post-Processing
+Scores the test FAISS candidates through the fine-tuned Transformer. Applies a Dual-Threshold Singleton Guard to maximize the F0.5 precision score before outputting final matches.
 ```bash
-python code/business_entity_resolution/src/stage06_inference.py
+python code/business_entity_resolution/src/stage06_graph_inference.py
 ```
 
 *Note: The official challenge `matching_results.tsv` output is generated and placed directly in the `output/` folder after this step.*
